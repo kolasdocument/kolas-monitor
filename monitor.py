@@ -8,35 +8,46 @@ from email.mime.text import MIMEText
 import traceback
 import time
 
-# =========================
-# 설정
-# =========================
+# ===============================
+# 기본 설정
+# ===============================
+BASE_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoom.do"
 LIST_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoomList.do"
 LAST_DATA_FILE = "last_data.txt"
 
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    ),
+    "Accept-Language": "ko-KR,ko;q=0.9",
+    "Content-Type": "application/x-www-form-urlencoded"
 }
 
-# =========================
-# 유틸 함수
-# =========================
-def normalize(s: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", s.upper())
-
+# ===============================
+# 유틸리티 함수
+# ===============================
 def to_date(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%Y-%m-%d")
 
 def parse_title(title_text: str):
     """
-    제목에서 문서코드, 문서제목, 개정일 추출
+    제목에서 문서코드, 문서제목, 개정일 파싱
     """
-    # 문서 코드 (KOLAS-R-001 / G / SR)
-    code_match = re.search(r"KOLAS[-\s]?(?:SR|R|G)[-\s]?\d{3}", title_text, re.IGNORECASE)
+    # 문서 코드
+    code_match = re.search(
+        r"KOLAS[-\s]?(?:SR|R|G)[-\s]?\d{3}",
+        title_text,
+        re.IGNORECASE
+    )
     doc_code = code_match.group(0).replace(" ", "").upper() if code_match else None
 
-    # 개정일 (YYYY.MM.DD 또는 YYYY.M.D)
-    date_match = re.search(r"\((20\d{2})\.(\d{1,2})\.(\d{1,2})\)", title_text)
+    # 개정일 (YYYY.M.D / YYYY.MM.DD 모두 허용)
+    date_match = re.search(
+        r"\((20\d{2})\.(\d{1,2})\.(\d{1,2})\)",
+        title_text
+    )
     revised_date = None
     if date_match:
         revised_date = (
@@ -45,7 +56,7 @@ def parse_title(title_text: str):
             f"{date_match.group(3).zfill(2)}"
         )
 
-    # 문서 제목 정리
+    # 문서 제목 정제
     doc_title = title_text
     if doc_code:
         doc_title = re.sub(doc_code, "", doc_title, flags=re.IGNORECASE)
@@ -55,9 +66,9 @@ def parse_title(title_text: str):
 
     return doc_code, doc_title.strip(), revised_date
 
-# =========================
+# ===============================
 # 기준 데이터 로드
-# =========================
+# ===============================
 last_info = {}
 if os.path.exists(LAST_DATA_FILE):
     with open(LAST_DATA_FILE, "r", encoding="utf-8") as f:
@@ -69,28 +80,43 @@ if os.path.exists(LAST_DATA_FILE):
 current_info = last_info.copy()
 updated_docs = []
 
-# =========================
-# 메인 로직
-# =========================
+# ===============================
+# 메인 처리
+# ===============================
 try:
     session = requests.Session()
+
+    # ✅ 1. 반드시 먼저 GET (세션 생성)
+    session.get(BASE_URL, headers=headers, timeout=20)
 
     page = 1
     while page <= 30:
         print(f"▶ 페이지 {page} 처리 중")
 
         payload = {
+            "boardSn": "111",    # ✅ KOLAS 문서 게시판 고유값
             "pageNo": str(page),
+            "searchType": "A",
+            "searchKeyword": "",
+            "searchStartDate": "",
+            "searchEndDate": "",
             "xlsDownloadYn": "N"
         }
 
         resp = session.post(LIST_URL, headers=headers, data=payload, timeout=20)
-        soup = BeautifulSoup(resp.text, "html.parser")
 
-        rows = soup.select("table.board_list tbody tr")
-        if not rows:
-            print("⚠️ 게시글 없음 또는 접근 차단")
+        if "board_list" not in resp.text:
+            print("⚠️ 게시판 HTML 미수신 (접근 차단 또는 구조 변경)")
             break
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        rows = soup.select("table.board_list tbody tr")
+
+        if not rows:
+            print("⚠️ 게시글 없음")
+            break
+
+        print(f"✅ {len(rows)}개 게시글 발견")
 
         for row in rows:
             cols = row.find_all("td")
@@ -101,13 +127,13 @@ try:
             title_text = cols[4].get_text(" ", strip=True)
 
             doc_code, doc_title, revised_date = parse_title(title_text)
-
             if not doc_code:
                 continue
 
             if revised_date is None:
                 revised_date = posted_date
 
+            # 기존 문서 비교
             if doc_code in last_info:
                 if to_date(revised_date) > to_date(last_info[doc_code]):
                     updated_docs.append(
@@ -133,9 +159,9 @@ except Exception:
     traceback.print_exc()
     raise
 
-# =========================
-# 결과 처리 (메일 + 파일 저장)
-# =========================
+# ===============================
+# 결과 처리
+# ===============================
 if updated_docs:
     msg_text = "KOLAS 문서 변경 알림\n\n" + "\n\n".join(updated_docs)
     msg = MIMEText(msg_text, _charset="utf-8")
@@ -152,6 +178,5 @@ if updated_docs:
             f.write(f"{code}|{date}\n")
 
     print("✅ 업데이트 알림 발송 및 기준 데이터 갱신 완료")
-
 else:
     print("ℹ️ 변경 사항 없음")
