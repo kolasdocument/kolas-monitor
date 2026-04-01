@@ -1,175 +1,125 @@
 import requests
 from bs4 import BeautifulSoup
-import re
-from datetime import datetime
-import os
 import smtplib
 from email.mime.text import MIMEText
-import traceback
+import os
+import re
 import time
 
-# ===============================
-# 설정
-# ===============================
-LIST_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoomList.do"
-LAST_DATA_FILE = "last_data.txt"
+# 1. 대상 문서 리스트 (엑셀 GetTargetCodes 동일)
+TARGET_CODES = [
+    "KOLAS-R-001", "KOLAS-R-002", "KOLAS-R-003", "KOLAS-R-004",
+    "KOLAS-R-005", "KOLAS-R-006", "KOLAS-R-007", "KOLAS-SR-002",
+    "KOLAS-G-001", "KOLAS-G-004", "KOLAS-G-005", "KOLAS-G-008",
+    "KOLAS-G-011", "KOLAS-G-013"
+]
 
+# 2. 기준 데이터 로드
+last_info = {}
+if os.path.exists('last_data.txt'):
+    with open('last_data.txt', 'r', encoding='utf-8') as f:
+        for line in f:
+            if '|' in line:
+                code, date = line.strip().split('|')
+                last_info[code.strip()] = date.strip()
+else:
+    # 파일이 없으면 오늘 날짜로 초기값 설정
+    for code in TARGET_CODES:
+        last_info[code] = "2000-01-01"
+
+LIST_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoomList.do"
+
+# 3. 브라우저 헤더 설정
 headers = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ko-KR,ko;q=0.9"
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/122.0.0.0',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'Referer': 'https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoom.do'
 }
 
-# ===============================
-# 유틸 함수
-# ===============================
-def to_date(date_str: str) -> datetime:
-    return datetime.strptime(date_str, "%Y-%m-%d")
-
-def parse_title(title_text: str):
-    """
-    제목에서 문서코드, 문서제목, 개정일 파싱
-    """
-
-    # 문서 코드 (KOLAS-R-001 / G / SR)
-    code_match = re.search(
-        r"KOLAS[-\s]?(?:SR|R|G)[-\s]?\d{3}",
-        title_text,
-        re.IGNORECASE
-    )
-    doc_code = code_match.group(0).replace(" ", "").upper() if code_match else None
-
-    # 개정일 (YYYY.M.D / YYYY.MM.DD)
-    date_match = re.search(
-        r"\((20\d{2})\.(\d{1,2})\.(\d{1,2})\)",
-        title_text
-    )
-    revised_date = None
-    if date_match:
-        revised_date = (
-            f"{date_match.group(1)}-"
-            f"{date_match.group(2).zfill(2)}-"
-            f"{date_match.group(3).zfill(2)}"
-        )
-
-    # 제목 정제
-    doc_title = title_text
-    if doc_code:
-        doc_title = re.sub(doc_code, "", doc_title, flags=re.IGNORECASE)
-    doc_title = re.sub(r"\(20\d{2}\.\d{1,2}\.\d{1,2}\)", "", doc_title)
-    doc_title = re.sub(r"^\(최신\)", "", doc_title)
-    doc_title = doc_title.strip(" -()")
-
-    return doc_code, doc_title.strip(), revised_date
-
-# ===============================
-# 기준 데이터 로드
-# ===============================
-last_info = {}
-if os.path.exists(LAST_DATA_FILE):
-    with open(LAST_DATA_FILE, "r", encoding="utf-8") as f:
-        for line in f:
-            if "|" in line:
-                code, date = line.strip().split("|")
-                last_info[code.strip()] = date.strip()
-
-current_info = last_info.copy()
 updated_docs = []
+current_info = last_info.copy()
 
-# ===============================
-# 메인 처리 (GET 방식)
-# ===============================
-try:
-    session = requests.Session()
+# 4. 세션 유지 및 탐색
+session = requests.Session()
 
-    page = 1
-    while page <= 30:
-        print(f"▶ 페이지 {page} 처리 중")
-
-        params = {
-            "boardSn": "111",    # ✅ KOLAS 문서 게시판
-            "pageNo": page
-        }
-
-        resp = session.get(LIST_URL, headers=headers, params=params, timeout=20)
-
-        if "board_list" not in resp.text:
-            print("⚠️ 게시판 HTML 미수신 (차단 또는 구조 변경)")
+for page in range(1, 11): # 우선 1~10페이지만 정밀 탐색
+    print(f"▶ 페이지 {page} 분석 중...")
+    
+    # 엑셀 매크로의 postData와 100% 동일하게 구성
+    payload = {
+        'pageNo': str(page),
+        'boardSn': '',
+        'xlsDownloadYn': 'N',
+        'totalCount': '',
+        'searchCat3': '',
+        'searchStartDate': '',
+        'searchEndDate': '',
+        'searchType': 'A',
+        'searchKeyword': ''
+    }
+    
+    try:
+        # 엑셀처럼 POST 요청 (타임아웃 넉넉히)
+        response = session.post(LIST_URL, headers=headers, data=payload, timeout=30)
+        response.encoding = 'utf-8'
+        
+        if response.status_code != 200 or "board_list" not in response.text:
+            print(f"   ⚠️ 응답 오류 (상태코드: {response.status_code})")
             break
-
-        soup = BeautifulSoup(resp.text, "html.parser")
-        rows = soup.select("table.board_list tbody tr")
-
-        if not rows:
-            print("⚠️ 게시글 없음")
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        rows = soup.select('table.board_list tbody tr')
+        
+        if not rows or "등록된 게시물이 없습니다" in response.text:
             break
-
-        print(f"✅ {len(rows)}개 게시글 발견")
 
         for row in rows:
-            cols = row.find_all("td")
-            if len(cols) < 5:
-                continue
-
-            # 게시일 (fallback)
-            posted_date = cols[3].get_text(strip=True).replace(".", "-")
-
-            # 제목
-            title_text = cols[4].get_text(" ", strip=True)
-
-            doc_code, doc_title, revised_date = parse_title(title_text)
-
-            if not doc_code:
-                continue
-
-            if revised_date is None:
-                revised_date = posted_date
-
-            if doc_code in last_info:
-                if to_date(revised_date) > to_date(last_info[doc_code]):
-                    updated_docs.append(
-                        f"▶ {doc_code}\n"
-                        f"- 제목: {doc_title}\n"
-                        f"- 개정일: {revised_date}"
-                    )
-                    current_info[doc_code] = revised_date
+            cols = row.find_all('td')
+            if len(cols) < 4: continue
+            
+            title = cols[3].get_text(" ", strip=True)
+            designated_date = cols[2].get_text(strip=True) # 지정일
+            
+            # 제목에서 날짜 추출 (엑셀 ExtractLastDateFromTitle 동일 로직)
+            date_match = re.search(r'(\d{4})\.(\d{1,2})\.(\d{1,2})', title)
+            if date_match:
+                y, m, d = date_match.groups()
+                row_date = f"{y}-{m.zfill(2)}-{d.zfill(2)}"
             else:
-                updated_docs.append(
-                    f"▶ {doc_code} (신규)\n"
-                    f"- 제목: {doc_title}\n"
-                    f"- 게시일: {revised_date}"
-                )
-                current_info[doc_code] = revised_date
+                row_date = designated_date
 
-        page += 1
-        time.sleep(1)
+            # 관리 대상 문서인지 확인
+            for code in TARGET_CODES:
+                if code.replace('-', '') in title.replace('-', ''):
+                    # 날짜 비교 및 업데이트
+                    if row_date > last_info.get(code, "2000-01-01"):
+                        print(f"   [!] 발견: {code} ({row_date})")
+                        updated_docs.append(f"• {code}\n  - 제목: {title}\n  - 날짜: {row_date}")
+                        current_info[code] = row_date
+                    break
+        
+        time.sleep(1.5)
 
-except Exception:
-    print("❌ 실행 중 오류 발생")
-    traceback.print_exc()
-    raise
+    except Exception as e:
+        print(f"   ❌ 에러: {e}")
+        break
 
-# ===============================
-# 결과 처리
-# ===============================
+# 5. 결과 발송
 if updated_docs:
-    msg_text = "KOLAS 문서 변경 알림\n\n" + "\n\n".join(updated_docs)
-    msg = MIMEText(msg_text, _charset="utf-8")
-    msg["Subject"] = "[KOLAS] 문서 개정 알림"
-    msg["From"] = os.environ["GMAIL_USER"]
-    msg["To"] = os.environ["RECEIVER_EMAIL"]
+    content = "KOLAS 관리문서 업데이트 내역:\n\n" + "\n\n".join(set(updated_docs))
+    msg = MIMEText(content)
+    msg['Subject'] = f"[KOLAS 알림] {len(updated_docs)}건의 개정 문서 발견"
+    msg['From'] = os.environ['GMAIL_USER']
+    msg['To'] = os.environ['RECEIVER_EMAIL']
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(os.environ["GMAIL_USER"], os.environ["GMAIL_PW"])
-        server.sendmail(msg["From"], msg["To"], msg.as_string())
-
-    with open(LAST_DATA_FILE, "w", encoding="utf-8") as f:
+        server.login(os.environ['GMAIL_USER'], os.environ['GMAIL_PW'])
+        server.sendmail(msg['From'], msg['To'], msg.as_string())
+    
+    # 갱신된 날짜 저장
+    with open('last_data.txt', 'w', encoding='utf-8') as f:
         for code, date in sorted(current_info.items()):
             f.write(f"{code}|{date}\n")
-
-    print("✅ 업데이트 알림 발송 및 기준 데이터 갱신 완료")
+    print("✅ 메일 발송 및 데이터 갱신 완료")
 else:
-    print("ℹ️ 변경 사항 없음")
+    print("ℹ️ 변경 사항이 없습니다.")
