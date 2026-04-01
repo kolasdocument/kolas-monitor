@@ -1,0 +1,43 @@
+name: KOLAS Monitor
+
+on:
+  schedule:
+    # 매일 한국 시간 오전 9시와 오후 6시에 실행 (UTC 기준 00:00, 09:00)
+    - cron: '0 0,9 * * *'
+  workflow_dispatch: # 필요할 때 수동으로 버튼을 눌러 실행할 수 있게 함
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 저장소에 글을 쓸 수 있는 권한 부여 (날짜 업데이트용)
+    permissions:
+      contents: write
+      
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Run monitoring script
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PW: ${{ secrets.GMAIL_PW }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+        run: python monitor.py
+
+      - name: Commit and push if last_data.txt changed
+        run: |
+          git config --global user.name 'github-actions'
+          git config --global user.email 'github-actions@github.com'
+          git add last_data.txt
+          # 변경사항이 있을 때만 커밋 (없으면 통과)
+          git commit -m "Update last_data.txt with new dates" || exit 0
+          git push
