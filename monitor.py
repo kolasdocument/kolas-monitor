@@ -173,4 +173,3 @@ if updated_docs:
     print("✅ 업데이트 알림 발송 및 기준 데이터 갱신 완료")
 else:
     print("ℹ️ 변경 사항 없음")
-``
