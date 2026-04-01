@@ -1,132 +1,83 @@
 import requests
 from bs4 import BeautifulSoup
-import smtplib
-from email.mime.text import MIMEText
-import os
 import re
-import time
+from datetime import datetime
 
-# 1. 기존 데이터 로드
-last_info = {}
-if os.path.exists('last_data.txt'):
-    with open('last_data.txt', 'r', encoding='utf-8') as f:
-        for line in f:
-            if '|' in line:
-                code, date = line.strip().split('|')
-                last_info[code.strip()] = date.strip()
-
-# URL 설정
-BASE_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoom.do"
 LIST_URL = "https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoomList.do"
 
-# 헤더를 엑셀(MSXML) 수준으로 단순화하면서도 브라우저처럼 보이게 설정
 headers = {
-   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br', # 압축 전송 허용
-    'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Cache-Control': 'max-age=0',
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Origin': 'https://www.knab.go.kr',
-    'Referer': 'https://www.knab.go.kr/inf/bbs/lawrecsroom/LawRecsRoom.do',
-    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'same-origin',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1'
+    "User-Agent": "Mozilla/5.0"
 }
 
-updated_docs = []
-current_info = last_info.copy()
+def normalize(s: str) -> str:
+    """문서 코드 비교용 문자열 정규화"""
+    return re.sub(r"[^A-Z0-9]", "", s.upper())
 
+def parse_title(title_text: str):
+    """
+    제목에서 문서코드, 문서제목, 개정일 추출
+    반환: (doc_code, doc_title, revised_date)
+    """
+
+    # 1️⃣ 문서 코드 추출 (KOLAS-R-001 등)
+    code_match = re.search(r"KOLAS[-\s]?(?:SR|R|G)[-\s]?\d{3}", title_text, re.IGNORECASE)
+    doc_code = code_match.group(0).replace(" ", "").upper() if code_match else None
+
+    # 2️⃣ 개정일 추출 (YYYY.MM.DD)
+    date_match = re.search(r"\((20\d{2})\.(\d{2})\.(\d{2})\)", title_text)
+    revised_date = None
+    if date_match:
+        revised_date = f"{date_match.group(1)}-{date_match.group(2)}-{date_match.group(3)}"
+
+    # 3️⃣ 문서 제목 정리 (코드, 날짜 제거)
+    doc_title = title_text
+    if doc_code:
+        doc_title = re.sub(doc_code, "", doc_title, flags=re.IGNORECASE)
+    doc_title = re.sub(r"\(20\d{2}\.\d{2}\.\d{2}\)", "", doc_title)
+    doc_title = doc_title.strip(" -()")
+
+    return doc_code, doc_title.strip(), revised_date
+
+
+def to_date(date_str: str):
+    return datetime.strptime(date_str, "%Y-%m-%d")
+
+
+# -------------------------
+# 실제 페이지 요청
+# -------------------------
 session = requests.Session()
+payload = {
+    "pageNo": "1",
+    "xlsDownloadYn": "N"
+}
 
-# 2. 첫 접속으로 세션 유지 (엑셀은 안 하지만 파이썬은 필요할 수 있음)
-try:
-    session.get(BASE_URL, headers=headers, timeout=10)
-except:
-    pass
+resp = session.post(LIST_URL, headers=headers, data=payload, timeout=20)
+soup = BeautifulSoup(resp.text, "html.parser")
 
-# 3. 페이지 탐색 시작
-page = 1
-while True:
-    print(f"--- {page}페이지 시도 중 ---")
-    
-    # [핵심] 엑셀 매크로의 postData와 글자 하나 안 틀리고 똑같이 만듭니다.
-    # 딕셔너리가 아닌 '문자열'로 직접 조립합니다.
-    raw_payload = (
-        f"pageNo={page}"
-        "&boardSn="
-        "&xlsDownloadYn=N"
-        "&totalCount="
-        "&searchCat3="
-        "&searchStartDate="
-        "&searchEndDate="
-        "&searchType=A"
-        "&searchKeyword="
-    )
-    
-    try:
-        # data 파라미터에 딕셔너리가 아닌 조립된 문자열(raw_payload)을 넣습니다.
-        response = session.post(LIST_URL, headers=headers, data=raw_payload, timeout=20)
-        
-        # 서버 응답 확인
-        soup = BeautifulSoup(response.text, 'html.parser')
-        rows = soup.select('table.board_list tbody tr')
+rows = soup.select("table.board_list tbody tr")
 
-        # 데이터 검증 로그
-        if not rows or "등록된 게시물이 없습니다" in soup.text:
-            # 만약 1페이지부터 이 메시지가 뜬다면 서버가 우리를 차단한 것입니다.
-            if page == 1:
-                print("⚠️ 경고: 1페이지부터 데이터를 가져오지 못했습니다. (보안 차단 가능성)")
-            break
+print("✅ 파싱 결과:")
+print("-" * 60)
 
-        print(f"  -> {len(rows)}개의 항목 발견!")
+for row in rows:
+    cols = row.find_all("td")
+    if len(cols) < 5:
+        continue
 
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) < 4: continue
-            
-            title_text = cols[3].get_text(" ", strip=True)
-            designated_date = cols[2].get_text(strip=True)
-            
-            date_match = re.search(r'(\d{4})\.(\d{1,2})\.(\d{1,2})', title_text)
-            current_date = f"{date_match.group(1)}-{date_match.group(2).zfill(2)}-{date_match.group(3).zfill(2)}" if date_match else designated_date
+    # 게시일 (fallback 용)
+    posted_date = cols[3].get_text(strip=True).replace(".", "-")
 
-            for doc_code in last_info.keys():
-                if doc_code.replace('-', '') in title_text.replace('-', ''):
-                    current_info[doc_code] = current_date
-                    if current_date > last_info[doc_code]:
-                        print(f"  [!] 업데이트: {doc_code}")
-                        updated_docs.append(f"▶ {doc_code} 개정\n- 제목: {title_text}\n- 날짜: {current_date}")
-                    break
+    # 제목
+    title_text = cols[4].get_text(" ", strip=True)
 
-        page += 1
-        time.sleep(1) # 차단 방지
-        if page > 30: break
+    doc_code, doc_title, revised_date = parse_title(title_text)
 
-    except Exception as e:
-        print(f"에러 발생: {e}")
-        break
+    if revised_date is None:
+        revised_date = posted_date  # fallback
 
-# 4. 결과 처리
-if updated_docs:
-    msg_text = "KOLAS 모니터링 결과:\n\n" + "\n\n".join(set(updated_docs))
-    msg = MIMEText(msg_text)
-    msg['Subject'] = "[KOLAS] 개정 문서 알림"
-    msg['From'] = os.environ['GMAIL_USER']
-    msg['To'] = os.environ['RECEIVER_EMAIL']
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(os.environ['GMAIL_USER'], os.environ['GMAIL_PW'])
-        server.sendmail(msg['From'], msg['To'], msg.as_string())
-
-    with open('last_data.txt', 'w', encoding='utf-8') as f:
-        for code, date in sorted(current_info.items()):
-            f.write(f"{code}|{date}\n")
-    print("성공적으로 처리되었습니다.")
-else:
-    print("변동 사항이 없습니다.")
+    print(f"문서코드 : {doc_code}")
+    print(f"문서제목 : {doc_title}")
+    print(f"개정일   : {revised_date}")
+    print("-" * 60)
+``
